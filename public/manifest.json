@@ -1,0 +1,26 @@
+{
+  "name": "Nepal Flood Map — Live Situation Dashboard",
+  "short_name": "Nepal Flood",
+  "description": "Real-time mapping and situation dashboard for the Nepal glacial flood (Bhote Koshi / Lhende Khola)",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#030712",
+  "theme_color": "#030712",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["news", "utilities"],
+  "lang": "en"
+}

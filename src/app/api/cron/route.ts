@@ -6,7 +6,7 @@
 // Add CRON_SECRET to .env.local (openssl rand -hex 32).
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   const auth = request.headers.get("authorization");
