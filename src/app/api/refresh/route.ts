@@ -168,6 +168,157 @@ async function fetchViaFreeLLM(): Promise<Partial<LiveStats> | null> {
   return null;
 }
 
+// ── Source 4.5: Google Gemini (multi-key fallback, 1,500 req/day per key) ──────
+async function fetchViaGemini(): Promise<Partial<LiveStats> | null> {
+  // Collect all available Gemini API keys (GEMINI_API_KEY1 through GEMINI_API_KEY7)
+  const keys: string[] = [];
+  for (let i = 1; i <= 7; i++) {
+    const key = process.env[`GEMINI_API_KEY${i}`];
+    if (key && key.trim()) {
+      keys.push(key.trim());
+    }
+  }
+
+  if (keys.length === 0) return null;
+
+  // Track exhausted keys to avoid retrying them in the same request
+  const exhaustedKeys = new Set<string>();
+
+  // Check if a response indicates rate limiting or quota exhaustion
+  function isGeminiRateLimited(status: number, body: unknown): boolean {
+    if (status === 429) return true; // Too Many Requests
+    if (status === 400 || status === 403) {
+      // Check for quota exceeded in error message
+      if (body && typeof body === 'object' && 'error' in body) {
+        const error = (body as Record<string, unknown>).error;
+        if (error && typeof error === 'object') {
+          // Check for message field
+          if ('message' in error) {
+            const msg = String((error as Record<string, unknown>).message).toLowerCase();
+            if (msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('rate')) {
+              return true;
+            }
+          }
+          // Check for details array (Gemini sometimes puts quota info here)
+          if ('details' in error && Array.isArray((error as Record<string, unknown>).details)) {
+            const details = (error as Record<string, unknown>).details as Array<Record<string, unknown>>;
+            for (const detail of details) {
+              if ('message' in detail) {
+                const msg = String(detail.message).toLowerCase();
+                if (msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('rate')) {
+                  return true;
+                }
+              }
+            }
+          }
+        }
+      }
+      return false; // Other 400/403 errors (invalid key, etc.) - don't retry with other keys
+    }
+    return false;
+  }
+
+  const systemPrompt =
+    "You are a disaster data analyst monitoring the August 26 2026 Nepal glacial flood " +
+    "(Bhote Koshi / Lhende Khola). Search for the LATEST confirmed official figures from " +
+    "Nepal Police, Nepal Army, NDRRMA, or major wire services (AP, Reuters, ABC News, NBC News). " +
+    "Ignore early estimates — use only the most recent confirmed figures. " +
+    "Return ONLY valid JSON with these exact keys (all numbers must be numeric type): " +
+    '{"deaths_nepal":number,"deaths_tibet":number,"deaths_total":number,' +
+    '"missing_nepal":number,"missing_foreigners":number,"missing_americans":number,' +
+    '"rescued":number,"impacted_total":number,"powerloss_mw":number,' +
+    '"source":"URL","last_updated":"ISO8601"} ' +
+    "No markdown. No explanation. JSON only.";
+
+  // Candidate models — newer accounts only have gemini-3.6-flash, older ones 2.5-flash
+  const MODELS = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-1.5-flash"];
+
+  // Try each key until one works or all are exhausted
+  for (const key of keys) {
+    if (exhaustedKeys.has(key)) continue;
+
+    try {
+      let data: any = null;
+      let lastStatus = 0;
+      let exhaustedByRate = false;
+
+      // Try each available model name for this key
+      for (const model of MODELS) {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [
+                { role: "user", parts: [{ text: systemPrompt }] },
+                { role: "user", parts: [{ text: "Get latest Nepal 2026 flood figures now." }] },
+              ],
+              generationConfig: {
+                temperature: 0.1,
+                maxOutputTokens: 1000,
+                responseMimeType: "application/json",
+              },
+            }),
+            signal: AbortSignal.timeout(15000),
+          }
+        );
+
+        if (res.ok) {
+          data = await res.json();
+          break;
+        }
+
+        lastStatus = res.status;
+        let body: unknown;
+        try {
+          body = await res.json();
+        } catch {
+          body = null;
+        }
+
+        if (isGeminiRateLimited(res.status, body)) {
+          exhaustedByRate = true;
+          break; // rate-limited → move to next key
+        }
+        // 404 (model not found) → try next model name
+      }
+
+      if (exhaustedByRate) {
+        exhaustedKeys.add(key);
+        console.log(`[Gemini] Key ending in ${key.slice(-4)} rate-limited (status: ${lastStatus}), trying next key...`);
+        continue;
+      }
+
+      if (!data) {
+        console.log(`[Gemini] Key ending in ${key.slice(-4)} failed with status ${lastStatus}, no model available`);
+        continue;
+      }
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      
+      if (!text) {
+        console.log(`[Gemini] Key ending in ${key.slice(-4)} returned empty response`);
+        continue;
+      }
+
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean) as Partial<LiveStats>;
+      
+      if (typeof parsed.deaths_total === "number") {
+        console.log(`[Gemini] Key ending in ${key.slice(-4)} succeeded`);
+        return { ...parsed, source: `Gemini: ${parsed.source ?? "LLM"}` };
+      }
+    } catch (err) {
+      console.log(`[Gemini] Key ending in ${key.slice(-4)} error: ${String(err)}`);
+      continue;
+    }
+  }
+
+  console.log(`[Gemini] All ${keys.length} keys exhausted`);
+  return null;
+}
+
 // ── Source 5: Anthropic web_search (optional — only if API key set) ───────────
 async function fetchViaAnthropic(): Promise<Partial<LiveStats> | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
@@ -221,11 +372,12 @@ function cleanPartial<T extends Partial<Record<string, unknown>>>(obj: T | null)
 
 export async function POST() {
   // Run all sources concurrently with independent timeouts
-  const [bipad, reliefweb, rss, freeLLM, anthropic] = await Promise.allSettled([
+  const [bipad, reliefweb, rss, freeLLM, gemini, anthropic] = await Promise.allSettled([
     fetchBIPAD(),
     fetchReliefWeb(),
     fetchViaRSS(),
     fetchViaFreeLLM(),
+    fetchViaGemini(),
     fetchViaAnthropic(),
   ]);
 
@@ -233,14 +385,16 @@ export async function POST() {
   const reliefwebData = reliefweb.status === "fulfilled" ? cleanPartial(reliefweb.value) : null;
   const rssData = rss.status === "fulfilled" ? cleanPartial(rss.value) : null;
   const freeLLMData = freeLLM.status === "fulfilled" ? cleanPartial(freeLLM.value) : null;
+  const geminiData = gemini.status === "fulfilled" ? cleanPartial(gemini.value) : null;
   const anthropicData = anthropic.status === "fulfilled" ? cleanPartial(anthropic.value) : null;
 
-  const anyLive = bipadData ?? freeLLMData ?? rssData ?? anthropicData ?? reliefwebData;
+  const anyLive = bipadData ?? freeLLMData ?? rssData ?? geminiData ?? anthropicData ?? reliefwebData;
 
-  // Merge: static base → Anthropic → Free LLM → RSS → ReliefWeb → BIPAD (override)
+  // Merge: static base → Anthropic → Gemini → Free LLM → RSS → ReliefWeb → BIPAD (override)
   const merged: LiveStats = {
     ...LIVE_STATS,
     ...(anthropicData ?? {}),
+    ...(geminiData ?? {}),
     ...(freeLLMData ?? {}),
     ...(rssData ?? {}),
     ...(reliefwebData ?? {}),

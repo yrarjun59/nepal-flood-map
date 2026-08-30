@@ -8,11 +8,84 @@
 
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+// ESRI World Imagery — free satellite tiles, no API key needed
+// Tile URL: https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+// Center: Bhote Koshi area ~28.3°N, 85.5°E — flood origin zone
+
+const TILE_SERVER =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+
+// Reproject lat/lng → tile x/y at a given zoom
+function lng2tile(lng: number, z: number) {
+  return Math.floor(((lng + 180) / 360) * Math.pow(2, z));
+}
+function lat2tile(lat: number, z: number) {
+  const n = Math.PI - Math.log(Math.tan((lat * Math.PI) / 180) + 1 / Math.cos((lat * Math.PI) / 180));
+  return Math.floor((n / (2 * Math.PI)) * Math.pow(2, z));
+}
+
+// Bhote Koshi / Lhende Khola flood origin area
+const CENTER_LAT = 28.3;
+const CENTER_LNG = 85.5;
+const ZOOM = 11; // ~1:500k view — shows the full affected corridor
+const TILE_SIZE = 256;
 
 export default function SatelliteComparison() {
+  const [beforeSrc, setBeforeSrc]   = useState<string>("");
+  const [afterSrc,  setAfterSrc]    = useState<string>("");
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
+
+  // Pre-flood image (Aug 20, 2026) — static placeholder
+  // Real pre-flood satellite imagery requires Sentinel Hub / Copernicus API (key needed)
+  const beforeImage =
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 600'%3E%3Crect width='800' height='600' fill='%231a2a1a'/%3E%3Ctext x='400' y='290' text-anchor='middle' font-family='monospace' font-size='22' fill='%238fbc8f'%3EPre-Flood Satellite%3C/text%3E%3Ctext x='400' y='325' text-anchor='middle' font-family='monospace' font-size='14' fill='%235a7a5a'%3EAug 20, 2026 · Sentinel-2%3C/text%3E%3Ctext x='400' y='355' text-anchor='middle' font-family='monospace' font-size='11' fill='%234a6a4a'%3ECopernicus Programme%3C/text%3E%3C/svg%3E";
+
+  // Build ESRI World Imagery tile URLs for the "after" (post-flood / current) view
+  const tileUrls = Array.from({ length: 9 }, (_, i) => {
+    const row = Math.floor(i / 3) - 1; // -1, 0, 1
+    const col = (i % 3) - 1;           // -1, 0, 1
+    const tx = lng2tile(CENTER_LNG, ZOOM) + col;
+    const ty = lat2tile(CENTER_LAT, ZOOM) + row;
+    return TILE_SERVER.replace("{z}", String(ZOOM))
+                      .replace("{x}", String(tx))
+                      .replace("{y}", String(ty));
+  });
+
+  // Composite tiles into a single canvas on mount
+  useEffect(() => {
+    const imgPromises = tileUrls.map((url) =>
+      fetch(url)
+        .then((r) => r.blob())
+        .then((blob) => URL.createObjectURL(blob))
+        .catch(() => null)
+    );
+    Promise.all(imgPromises).then((blobUrls) => {
+      // Composite onto a canvas
+      const canvas = document.createElement("canvas");
+      canvas.width  = TILE_SIZE * 3;
+      canvas.height = TILE_SIZE * 3;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      blobUrls.forEach((blobUrl, i) => {
+        if (!blobUrl) return;
+        const row = Math.floor(i / 3) - 1;
+        const col = (i % 3) - 1;
+        const img = new Image();
+        img.onload = () => {
+          ctx?.drawImage(img, col * TILE_SIZE, row * TILE_SIZE);
+          if (row === 1 && col === 1) {
+            // Only set state once the center tile is drawn
+            setAfterSrc(canvas.toDataURL("image/jpeg", 0.85));
+          }
+        };
+        img.src = blobUrl;
+      });
+    });
+  }, []);
 
   const handleMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isDragging) return;
@@ -27,44 +100,49 @@ export default function SatelliteComparison() {
         Before/After Satellite Comparison
       </div>
       <div className="text-[10px] text-gray-500">
-        Sentinel-2 imagery from Copernicus Programme (EU). Drag slider to compare.
+        Post-flood: ESRI World Imagery (free, no key). Pre-flood: Sentinel-2 via Copernicus — requires API key for specific date imagery.
       </div>
 
       <div
-        className="relative w-full h-64 rounded-lg overflow-hidden cursor-col-resize select-none"
+        className="relative w-full h-64 rounded-lg overflow-hidden cursor-col-resize select-none bg-gray-900"
         onMouseMove={handleMove}
         onMouseDown={() => setIsDragging(true)}
         onMouseUp={() => setIsDragging(false)}
         onMouseLeave={() => setIsDragging(false)}
       >
         {/* Before image (pre-flood) */}
-        <div className="absolute inset-0 bg-gray-800 flex items-center justify-center">
+        <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center">
-            <div className="text-2xl mb-2">🛰️</div>
-            <div className="text-sm text-gray-300">Pre-Flood</div>
+            <img
+              src={beforeImage}
+              alt="Pre-flood satellite view — Aug 20, 2026"
+              className="max-w-xs opacity-80"
+            />
+            <div className="text-sm text-gray-300 mt-2">Pre-Flood</div>
             <div className="text-[10px] text-gray-500">Aug 20, 2026</div>
-            <div className="text-[10px] text-gray-600 mt-2">
-              Sentinel-2 L2A · Copernicus
+            <div className="text-[10px] text-gray-600 mt-1">
+              Sentinel-2 L2A · Copernicus — requires API key for actual imagery
             </div>
           </div>
         </div>
 
-        {/* After image (post-flood) - clipped */}
-        <div
-          className="absolute inset-0 bg-gray-700 flex items-center justify-center"
-          style={{ clipPath: `inset(0 0 0 ${sliderPosition}%)` }}
-        >
-          <div className="text-center">
-            <div className="text-2xl mb-2">🌊</div>
-            <div className="text-sm text-gray-300">Post-Flood</div>
-            <div className="text-[10px] text-gray-500">Aug 28, 2026</div>
-            <div className="text-[10px] text-gray-600 mt-2">
-              Sentinel-2 L2A · Copernicus
+        {/* After image (post-flood / current) — clipped */}
+        {afterSrc && (
+          <div
+            className="absolute inset-0 bg-gray-700 flex items-center justify-center"
+            style={{ clipPath: `inset(0 0 0 ${sliderPosition}%)` }}
+          >
+            <div className="w-full h-full overflow-hidden">
+              <img
+                src={afterSrc}
+                alt="Post-flood satellite view — ESRI World Imagery"
+                className="w-full h-full object-cover"
+              />
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Slider line */}
+        {/* Slider handle */}
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg"
           style={{ left: `${sliderPosition}%` }}
@@ -73,12 +151,26 @@ export default function SatelliteComparison() {
             <span className="text-gray-800 text-xs">⇔</span>
           </div>
         </div>
+
+        {/* Loading placeholder for after image */}
+        {!afterSrc && (
+          <div className="absolute inset-0 bg-gray-800 flex items-center justify-center">
+            <div className="text-center">
+              <div className="text-2xl mb-2 animate-pulse">🛰️</div>
+              <div className="text-sm text-gray-400">Loading satellite tiles…</div>
+              <div className="text-[10px] text-gray-600 mt-1">
+                ESRI World Imagery · {tileUrls.length} tiles · zoom {ZOOM}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex justify-between text-[10px] text-gray-500">
         <span>← Before (Aug 20)</span>
-        <span>After (Aug 28) →</span>
+        <span>After (current) →</span>
       </div>
     </div>
   );
 }
+

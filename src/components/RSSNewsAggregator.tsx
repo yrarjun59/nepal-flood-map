@@ -85,14 +85,22 @@ const MOCK_NEWS: NewsItem[] = [
   },
 ];
 
-// ── Client-safe date formatter ─────────────────────────────────────────────────
-// Returns "" during SSR and before client mount so server and client render match.
-// After mount, fills in the formatted date.
-function formattedDate(isoString: string): string {
+// ── Client-safe date formatter component ───────────────────────────────────────
+// Renders "" during SSR and before client mount, then fills in the formatted date.
+// This is a proper React component so hooks follow the rules of hooks.
+function FormattedDate({ isoString }: { isoString: string }) {
   const [mounted, setMounted] = useState(false);
-  useEffect(() => { setMounted(true); }, []);
-  if (!mounted) return "";
-  return new Date(isoString).toLocaleString();
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) return <span className="text-gray-600">—</span>;
+  return (
+    <span className="text-gray-600">
+      {new Date(isoString).toLocaleString()}
+    </span>
+  );
 }
 
 export default function RSSNewsAggregator() {
@@ -169,14 +177,14 @@ export default function RSSNewsAggregator() {
               {item.summary}
             </div>
             <div className="text-[10px] text-gray-600 mt-1">
-              {formattedDate(item.pubDate)}
+              <FormattedDate isoString={item.pubDate} />
             </div>
           </a>
         ))}
       </div>
 
       <div className="text-[10px] text-gray-600 border-t border-gray-800 pt-2">
-        Last fetched: {formattedDate(lastFetch)} ·{' '}
+        Last fetched: <FormattedDate isoString={lastFetch} /> ·{' '}
         {sources.newsApi || sources.google ? "Live APIs + " : ""}Free RSS feeds
       </div>
     </div>
