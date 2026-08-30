@@ -9,7 +9,6 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.122.0",
     "@cesium/engine": "^26.2.0",
     "@cesium/widgets": "^16.1.1",
     "@types/leaflet": "^1.9.22",

@@ -87,7 +87,7 @@ src/
 | 6 | **Free LLM** (NVIDIA NIM / Groq / Together / OpenRouter) | OpenAI-compatible | Optional | News summarization fallback |
 | 7 | **Static Fallback** | Local TS | — | Verified Aug 29 2026 data |
 
-> **Anthropic API is optional** — only activates if `ANTHROPIC_API_KEY` is set. The app runs fully free using RSS as primary live news source.
+> **Gemini API is the primary LLM** — the app uses Gemini 1.5 Flash with 7 API keys for automatic rate-limit fallback. The app runs fully free using RSS as primary live news source and Gemini as the AI summarization layer.
 
 ---
 
