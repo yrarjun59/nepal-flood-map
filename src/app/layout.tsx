@@ -40,7 +40,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="icon" href="/favicon.ico" />
       <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
       </head>
-      <body className="bg-gray-950 text-white antialiased">
+      <body className="bg-gray-950 text-white antialiased" suppressHydrationWarning>
         {children}
         <script
           dangerouslySetInnerHTML={{

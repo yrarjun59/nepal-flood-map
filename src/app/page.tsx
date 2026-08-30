@@ -114,8 +114,7 @@ export default function Page() {
               </p>
             </div>
             <a
-              href="/FIELD_GUIDE.md"
-              target="_blank"
+              href="/field-guide"
               className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg px-4 py-2 transition-colors"
             >
               Open Guide
