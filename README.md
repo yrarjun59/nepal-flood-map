@@ -127,9 +127,9 @@ npm start
 
 ---
 
-## 🌐 Free News & LLM Alternatives (No Anthropic Key Needed)
+## 🌐 Free LLM Alternatives (Gemini 1.5 Flash — Primary LLM)
 
-The dashboard includes optional news aggregation and LLM-based summarization fallbacks. **Completely free options:**
+The dashboard uses **Google Gemini 1.5 Flash** as its primary LLM for AI news summarization, with 7 API keys configured for automatic rate-limit fallback (1,500 req/day per key = 10,500 req/day total).
 
 ### News Aggregation APIs
 
