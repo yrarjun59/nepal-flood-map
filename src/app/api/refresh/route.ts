@@ -22,7 +22,7 @@ function createOpenAIClient(baseURL: string, apiKey: string) {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: "auto", // let provider choose
+          model: "auto",
           messages,
           max_tokens: 1000,
           temperature: 0.1,
@@ -66,7 +66,7 @@ async function fetchBIPAD(): Promise<Partial<LiveStats> | null> {
   }
 }
 
-// ── Source 2: UN OCHA ReliefWeb (no key needed — just appname param) ──────────
+// ── Source 2: UN OCHA ReliefWeb (no key needed) ────────────────────────────────
 async function fetchReliefWeb(): Promise<Partial<LiveStats> | null> {
   try {
     const url =
@@ -104,14 +104,13 @@ async function fetchViaRSS(): Promise<Partial<LiveStats> | null> {
   }
 }
 
-// ── Source 4: Free LLM Alternatives (NVIDIA NIM, Groq, Together, OpenRouter) ──
+// ── Source 4: Free LLM Alternatives ────────────────────────────────────────────
 async function fetchViaFreeLLM(): Promise<Partial<LiveStats> | null> {
-  // Try each provider in order (all OpenAI-compatible)
   const providers = [
     {
       name: "NVIDIA NIM",
       baseURL: process.env.NVIDIA_NIM_BASE_URL || "https://integrate.api.nvidia.com/v1",
-      apiKey: process.env.NVIDIA_NIM_API_KEY,
+      apiKey: process.env.NVIDIA_API_KEY,
     },
     {
       name: "Groq",
@@ -144,66 +143,52 @@ async function fetchViaFreeLLM(): Promise<Partial<LiveStats> | null> {
 
   for (const provider of providers) {
     if (!provider.apiKey) continue;
-
     try {
       const client = createOpenAIClient(provider.baseURL, provider.apiKey);
       const text = await client.chat([
         { role: "system", content: systemPrompt },
         { role: "user", content: "Get latest Nepal 2026 flood figures now." },
       ]);
-
       const clean = text.replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(clean) as Partial<LiveStats>;
       if (typeof parsed.deaths_total === "number") {
         return { ...parsed, source: `${provider.name}: ${parsed.source ?? "LLM"}` };
       }
     } catch {
-      // Try next provider
       continue;
     }
   }
-
   return null;
 }
 
-// ── Source 4.5: Google Gemini (multi-key fallback, 1,500 req/day per key) ──────
+// ── Source 4.5: Google Gemini (multi-key fallback) ─────────────────────────────
 async function fetchViaGemini(): Promise<Partial<LiveStats> | null> {
-  // Collect all available Gemini API keys (GEMINI_API_KEY1 through GEMINI_API_KEY7)
   const keys: string[] = [];
   for (let i = 1; i <= 7; i++) {
     const key = process.env[`GEMINI_API_KEY${i}`];
-    if (key && key.trim()) {
-      keys.push(key.trim());
-    }
+    if (key?.trim()) keys.push(key.trim());
   }
-
   if (keys.length === 0) return null;
 
-  // Track exhausted keys to avoid retrying them in the same request
   const exhaustedKeys = new Set<string>();
 
-  // Check if a response indicates rate limiting or quota exhaustion
   function isGeminiRateLimited(status: number, body: unknown): boolean {
-    if (status === 429) return true; // Too Many Requests
+    if (status === 429) return true;
     if (status === 400 || status === 403) {
-      // Check for quota exceeded in error message
-      if (body && typeof body === 'object' && 'error' in body) {
-        const error = (body as Record<string, unknown>).error;
-        if (error && typeof error === 'object') {
-          // Check for message field
-          if ('message' in error) {
-            const msg = String((error as Record<string, unknown>).message).toLowerCase();
-            if (msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('rate')) {
+      if (body && typeof body === "object" && "error" in body) {
+        const error = body.error as Record<string, unknown>;
+        if (error && typeof error === "object") {
+          if ("message" in error) {
+            const msg = String(error.message).toLowerCase();
+            if (msg.includes("quota") || msg.includes("limit") || msg.includes("exceeded") || msg.includes("rate")) {
               return true;
             }
           }
-          // Check for details array (Gemini sometimes puts quota info here)
-          if ('details' in error && Array.isArray((error as Record<string, unknown>).details)) {
-            const details = (error as Record<string, unknown>).details as Array<Record<string, unknown>>;
-            for (const detail of details) {
-              if ('message' in detail) {
+          if ("details" in error && Array.isArray(error.details)) {
+            for (const detail of error.details as Array<Record<string, unknown>>) {
+              if ("message" in detail) {
                 const msg = String(detail.message).toLowerCase();
-                if (msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('rate')) {
+                if (msg.includes("quota") || msg.includes("limit") || msg.includes("exceeded") || msg.includes("rate")) {
                   return true;
                 }
               }
@@ -211,7 +196,6 @@ async function fetchViaGemini(): Promise<Partial<LiveStats> | null> {
           }
         }
       }
-      return false; // Other 400/403 errors (invalid key, etc.) - don't retry with other keys
     }
     return false;
   }
@@ -228,85 +212,63 @@ async function fetchViaGemini(): Promise<Partial<LiveStats> | null> {
     '"source":"URL","last_updated":"ISO8601"} ' +
     "No markdown. No explanation. JSON only.";
 
-  // Candidate models — newer accounts only have gemini-3.6-flash, older ones 2.5-flash
-  const MODELS = ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-1.5-flash"];
-
-  // Try each key until one works or all are exhausted
   for (const key of keys) {
     if (exhaustedKeys.has(key)) continue;
 
     try {
-      let data: any = null;
-      let lastStatus = 0;
-      let exhaustedByRate = false;
-
-      // Try each available model name for this key
-      for (const model of MODELS) {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [
-                { role: "user", parts: [{ text: systemPrompt }] },
-                { role: "user", parts: [{ text: "Get latest Nepal 2026 flood figures now." }] },
-              ],
-              generationConfig: {
-                temperature: 0.1,
-                maxOutputTokens: 1000,
-                responseMimeType: "application/json",
-              },
-            }),
-            signal: AbortSignal.timeout(15000),
-          }
-        );
-
-        if (res.ok) {
-          data = await res.json();
-          break;
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              { role: "user", parts: [{ text: systemPrompt }] },
+              { role: "user", parts: [{ text: "Get latest Nepal 2026 flood figures now." }] },
+            ],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 1000,
+              responseMimeType: "application/json",
+            },
+          }),
+          signal: AbortSignal.timeout(15000),
         }
+      );
 
-        lastStatus = res.status;
-        let body: unknown;
-        try {
-          body = await res.json();
-        } catch {
-          body = null;
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+        if (!text) {
+          console.log(`[Gemini] Key ending in ${key.slice(-4)} returned empty response`);
+          continue;
         }
-
-        if (isGeminiRateLimited(res.status, body)) {
-          exhaustedByRate = true;
-          break; // rate-limited → move to next key
+        const clean = text.replace(/```json|```/g, "").trim();
+        const parsed = JSON.parse(clean) as Partial<LiveStats>;
+        if (typeof parsed.deaths_total === "number") {
+          console.log(`[Gemini] Key ending in ${key.slice(-4)} succeeded`);
+          return { ...parsed, source: `Gemini: ${parsed.source ?? "LLM"}` };
         }
-        // 404 (model not found) → try next model name
+        console.log(`[Gemini] Key ending in ${key.slice(-4)} returned non-numeric data`);
+        continue;
       }
 
-      if (exhaustedByRate) {
+      const status = res.status;
+      let body: unknown;
+      try { body = await res.json(); } catch { body = null; }
+
+      if (isGeminiRateLimited(status, body)) {
         exhaustedKeys.add(key);
-        console.log(`[Gemini] Key ending in ${key.slice(-4)} rate-limited (status: ${lastStatus}), trying next key...`);
+        console.log(`[Gemini] Key ending in ${key.slice(-4)} rate-limited (${status})`);
         continue;
       }
 
-      if (!data) {
-        console.log(`[Gemini] Key ending in ${key.slice(-4)} failed with status ${lastStatus}, no model available`);
+      if (status === 404) {
+        console.log(`[Gemini] Key ending in ${key.slice(-4)} has no model access (404)`);
         continue;
       }
 
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-      
-      if (!text) {
-        console.log(`[Gemini] Key ending in ${key.slice(-4)} returned empty response`);
-        continue;
-      }
-
-      const clean = text.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean) as Partial<LiveStats>;
-      
-      if (typeof parsed.deaths_total === "number") {
-        console.log(`[Gemini] Key ending in ${key.slice(-4)} succeeded`);
-        return { ...parsed, source: `Gemini: ${parsed.source ?? "LLM"}` };
-      }
+      console.log(`[Gemini] Key ending in ${key.slice(-4)} failed: HTTP ${status}`);
     } catch (err) {
       console.log(`[Gemini] Key ending in ${key.slice(-4)} error: ${String(err)}`);
       continue;
@@ -317,7 +279,7 @@ async function fetchViaGemini(): Promise<Partial<LiveStats> | null> {
   return null;
 }
 
-// Remove null/undefined fields so they don't overwrite static fallback values
+// ── Strip null/undefined so static fallbacks aren't overwritten ────────────────
 function cleanPartial<T extends Partial<Record<string, unknown>>>(obj: T | null): Partial<T> {
   if (!obj) return {};
   const result: Partial<T> = {};
@@ -330,8 +292,8 @@ function cleanPartial<T extends Partial<Record<string, unknown>>>(obj: T | null)
   return result;
 }
 
+// ── Main handler ────────────────────────────────────────────────────────────────
 export async function POST() {
-  // Run all sources concurrently with independent timeouts
   const [bipad, reliefweb, rss, freeLLM, gemini] = await Promise.allSettled([
     fetchBIPAD(),
     fetchReliefWeb(),
@@ -340,15 +302,14 @@ export async function POST() {
     fetchViaGemini(),
   ]);
 
-  const bipadData = bipad.status === "fulfilled" ? cleanPartial(bipad.value) : null;
-  const reliefwebData = reliefweb.status === "fulfilled" ? cleanPartial(reliefweb.value) : null;
-  const rssData = rss.status === "fulfilled" ? cleanPartial(rss.value) : null;
-  const freeLLMData = freeLLM.status === "fulfilled" ? cleanPartial(freeLLM.value) : null;
-  const geminiData = gemini.status === "fulfilled" ? cleanPartial(gemini.value) : null;
+  const bipadData      = bipad.status     === "fulfilled" ? cleanPartial(bipad.value)      : null;
+  const reliefwebData  = reliefweb.status === "fulfilled" ? cleanPartial(reliefweb.value)  : null;
+  const rssData        = rss.status       === "fulfilled" ? cleanPartial(rss.value)        : null;
+  const freeLLMData    = freeLLM.status   === "fulfilled" ? cleanPartial(freeLLM.value)    : null;
+  const geminiData     = gemini.status    === "fulfilled" ? cleanPartial(gemini.value)     : null;
 
   const anyLive = bipadData ?? freeLLMData ?? rssData ?? geminiData ?? reliefwebData;
 
-  // Merge: static base → Gemini → Free LLM → RSS → ReliefWeb → BIPAD (override)
   const merged: LiveStats = {
     ...LIVE_STATS,
     ...(geminiData ?? {}),
