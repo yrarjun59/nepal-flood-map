@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="32" fill="#030712"/>
+  <circle cx="96" cy="72" r="40" fill="#ef4444" opacity="0.9"/>
+  <path d="M56 130 Q76 100 96 110 Q116 100 136 130 Q136 150 96 160 Q56 150 56 130Z" fill="#3b82f6"/>
+  <path d="M96 110 L96 145 M76 125 L116 125" stroke="#94a3b8" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <text x="96" y="180" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="bold" fill="#94a3b8">NEPAL</text>
+</svg>

@@ -85,6 +85,16 @@ const MOCK_NEWS: NewsItem[] = [
   },
 ];
 
+// ── Client-safe date formatter ─────────────────────────────────────────────────
+// Returns "" during SSR and before client mount so server and client render match.
+// After mount, fills in the formatted date.
+function formattedDate(isoString: string): string {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+  if (!mounted) return "";
+  return new Date(isoString).toLocaleString();
+}
+
 export default function RSSNewsAggregator() {
   const [news, setNews] = useState<NewsItem[]>(MOCK_NEWS);
   const [loading, setLoading] = useState(false);
@@ -159,14 +169,14 @@ export default function RSSNewsAggregator() {
               {item.summary}
             </div>
             <div className="text-[10px] text-gray-600 mt-1">
-              {new Date(item.pubDate).toLocaleString()}
+              {formattedDate(item.pubDate)}
             </div>
           </a>
         ))}
       </div>
 
       <div className="text-[10px] text-gray-600 border-t border-gray-800 pt-2">
-        Last fetched: {new Date(lastFetch).toLocaleString()} ·{' '}
+        Last fetched: {formattedDate(lastFetch)} ·{' '}
         {sources.newsApi || sources.google ? "Live APIs + " : ""}Free RSS feeds
       </div>
     </div>
