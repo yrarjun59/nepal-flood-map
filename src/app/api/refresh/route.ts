@@ -7,11 +7,37 @@
 // Falls back to static data on any failure — never returns 5xx.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import Anthropic        from "@anthropic-ai/sdk";
-import { LIVE_STATS }  from "@/data/floodData";
+import Anthropic from "@anthropic-ai/sdk";
+import { LIVE_STATS } from "@/data/floodData";
 import type { LiveStats } from "@/types/flood";
 
-const client = new Anthropic();
+const anthropicClient = new Anthropic();
+
+// ── OpenAI-compatible client for free LLM alternatives ────────────────────────
+function createOpenAIClient(baseURL: string, apiKey: string) {
+  return {
+    async chat(messages: Array<{ role: string; content: string }>) {
+      const res = await fetch(`${baseURL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "auto", // let provider choose
+          messages,
+          max_tokens: 1000,
+          temperature: 0.1,
+          response_format: { type: "json_object" },
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      return data.choices?.[0]?.message?.content ?? "";
+    },
+  };
+}
 
 // ── Source 1: BIPAD Nepal Govt API (highest authority, no key needed) ─────────
 async function fetchBIPAD(): Promise<Partial<LiveStats> | null> {
@@ -26,16 +52,16 @@ async function fetchBIPAD(): Promise<Partial<LiveStats> | null> {
     const incident = (data.results ?? []).find((r: Record<string, unknown>) =>
       String(r.title ?? "").toLowerCase().includes("bhote") ||
       String(r.title ?? "").toLowerCase().includes("flood") ||
-      String(r.date  ?? "").startsWith("2026-08-26")
+      String(r.date ?? "").startsWith("2026-08-26")
     );
     if (!incident) return null;
 
     return {
-      deaths_nepal:  (incident.death    as number) ?? null,
-      missing_nepal: (incident.missing  as number) ?? null,
-      rescued:       (incident.rescued  as number) ?? null,
-      source:        "BIPAD Nepal Government Portal",
-      last_updated:  (incident.updated_at as string) ?? new Date().toISOString(),
+      deaths_nepal: (incident.death as number) ?? null,
+      missing_nepal: (incident.missing as number) ?? null,
+      rescued: (incident.rescued as number) ?? null,
+      source: "BIPAD Nepal Government Portal",
+      last_updated: (incident.updated_at as string) ?? new Date().toISOString(),
     };
   } catch {
     return null;
@@ -57,7 +83,7 @@ async function fetchReliefWeb(): Promise<Partial<LiveStats> | null> {
     const latest = data.data?.[0];
     if (!latest) return null;
     return {
-      source:       `ReliefWeb/OCHA: ${latest.fields?.title ?? "Nepal SITREP"}`,
+      source: `ReliefWeb/OCHA: ${latest.fields?.title ?? "Nepal SITREP"}`,
       last_updated: latest.fields?.date?.created ?? new Date().toISOString(),
     };
   } catch {
@@ -68,8 +94,6 @@ async function fetchReliefWeb(): Promise<Partial<LiveStats> | null> {
 // ── Source 3: Free RSS News Aggregator (no API key needed) ────────────────────
 async function fetchViaRSS(): Promise<Partial<LiveStats> | null> {
   try {
-    // In production, this would hit /api/rss-proxy which server-side fetches
-    // RSS feeds from ABC News, NBC News, CBS News, The Watchers, EarthSky
     const res = await fetch("/api/rss-aggregate", {
       signal: AbortSignal.timeout(10000),
     });
@@ -82,15 +106,79 @@ async function fetchViaRSS(): Promise<Partial<LiveStats> | null> {
   }
 }
 
-// ── Source 4: Anthropic web_search (optional — only if API key set) ───────────
+// ── Source 4: Free LLM Alternatives (NVIDIA NIM, Groq, Together, OpenRouter) ──
+async function fetchViaFreeLLM(): Promise<Partial<LiveStats> | null> {
+  // Try each provider in order (all OpenAI-compatible)
+  const providers = [
+    {
+      name: "NVIDIA NIM",
+      baseURL: process.env.NVIDIA_NIM_BASE_URL || "https://integrate.api.nvidia.com/v1",
+      apiKey: process.env.NVIDIA_NIM_API_KEY,
+    },
+    {
+      name: "Groq",
+      baseURL: "https://api.groq.com/openai/v1",
+      apiKey: process.env.GROQ_API_KEY,
+    },
+    {
+      name: "Together AI",
+      baseURL: "https://api.together.xyz/v1",
+      apiKey: process.env.TOGETHER_API_KEY,
+    },
+    {
+      name: "OpenRouter",
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: process.env.OPENROUTER_API_KEY,
+    },
+  ];
+
+  const systemPrompt =
+    "You are a disaster data analyst monitoring the August 26 2026 Nepal glacial flood " +
+    "(Bhote Koshi / Lhende Khola). Search for the LATEST confirmed official figures from " +
+    "Nepal Police, Nepal Army, NDRRMA, or major wire services (AP, Reuters, ABC News, NBC News). " +
+    "Ignore early estimates — use only the most recent confirmed figures. " +
+    "Return ONLY valid JSON with these exact keys (all numbers must be numeric type): " +
+    '{"deaths_nepal":number,"deaths_tibet":number,"deaths_total":number,' +
+    '"missing_nepal":number,"missing_foreigners":number,"missing_americans":number,' +
+    '"rescued":number,"impacted_total":number,"powerloss_mw":number,' +
+    '"source":"URL","last_updated":"ISO8601"} ' +
+    "No markdown. No explanation. JSON only.";
+
+  for (const provider of providers) {
+    if (!provider.apiKey) continue;
+
+    try {
+      const client = createOpenAIClient(provider.baseURL, provider.apiKey);
+      const text = await client.chat([
+        { role: "system", content: systemPrompt },
+        { role: "user", content: "Get latest Nepal 2026 flood figures now." },
+      ]);
+
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean) as Partial<LiveStats>;
+      if (typeof parsed.deaths_total === "number") {
+        return { ...parsed, source: `${provider.name}: ${parsed.source ?? "LLM"}` };
+      }
+    } catch {
+      // Try next provider
+      continue;
+    }
+  }
+
+  return null;
+}
+
+// ── Source 5: Anthropic web_search (optional — only if API key set) ───────────
 async function fetchViaAnthropic(): Promise<Partial<LiveStats> | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   try {
-    const tools: Anthropic.ToolUnion[] = [{ type: "web_search_20250305", name: "web_search" } as Anthropic.WebSearchTool20250305];
-    const response = await client.messages.create({
-      model:      "claude-sonnet-4-6",
+    const tools: Anthropic.ToolUnion[] = [
+      { type: "web_search_20250305", name: "web_search" } as Anthropic.WebSearchTool20250305,
+    ];
+    const response = await anthropicClient.messages.create({
+      model: "claude-sonnet-4-6",
       max_tokens: 1000,
-      tools:      tools,
+      tools: tools,
       system:
         "You are a disaster data analyst monitoring the August 26 2026 Nepal glacial flood " +
         "(Bhote Koshi / Lhende Khola). Search for the LATEST confirmed official figures from " +
@@ -109,7 +197,7 @@ async function fetchViaAnthropic(): Promise<Partial<LiveStats> | null> {
       .filter((b) => b.type === "text")
       .map((b) => (b as { type: "text"; text: string }).text)
       .join("");
-    const clean  = text.replace(/```json|```/g, "").trim();
+    const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean) as Partial<LiveStats>;
     if (typeof parsed.deaths_total !== "number") return null;
     return parsed;
@@ -133,27 +221,30 @@ function cleanPartial<T extends Partial<Record<string, unknown>>>(obj: T | null)
 
 export async function POST() {
   // Run all sources concurrently with independent timeouts
-  const [bipad, reliefweb, rss, anthropic] = await Promise.allSettled([
+  const [bipad, reliefweb, rss, freeLLM, anthropic] = await Promise.allSettled([
     fetchBIPAD(),
     fetchReliefWeb(),
     fetchViaRSS(),
+    fetchViaFreeLLM(),
     fetchViaAnthropic(),
   ]);
 
-  const bipadData     = bipad.status     === "fulfilled" ? cleanPartial(bipad.value)     : null;
+  const bipadData = bipad.status === "fulfilled" ? cleanPartial(bipad.value) : null;
   const reliefwebData = reliefweb.status === "fulfilled" ? cleanPartial(reliefweb.value) : null;
-  const rssData       = rss.status       === "fulfilled" ? cleanPartial(rss.value)       : null;
+  const rssData = rss.status === "fulfilled" ? cleanPartial(rss.value) : null;
+  const freeLLMData = freeLLM.status === "fulfilled" ? cleanPartial(freeLLM.value) : null;
   const anthropicData = anthropic.status === "fulfilled" ? cleanPartial(anthropic.value) : null;
 
-  const anyLive = bipadData ?? rssData ?? anthropicData ?? reliefwebData;
+  const anyLive = bipadData ?? freeLLMData ?? rssData ?? anthropicData ?? reliefwebData;
 
-  // Merge: static base → Anthropic (news) → RSS → ReliefWeb (timestamp) → BIPAD (override)
+  // Merge: static base → Anthropic → Free LLM → RSS → ReliefWeb → BIPAD (override)
   const merged: LiveStats = {
     ...LIVE_STATS,
     ...(anthropicData ?? {}),
+    ...(freeLLMData ?? {}),
     ...(rssData ?? {}),
     ...(reliefwebData ?? {}),
-    ...(bipadData     ?? {}),
+    ...(bipadData ?? {}),
     fallback: !anyLive,
   };
 

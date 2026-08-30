@@ -4,30 +4,135 @@
 //
 // GET /api/dhm-gauges
 // Scrapes river gauge data from Nepal's Department of Hydrology & Meteorology
+// Falls back to mock data when DHM site is unavailable
 // Free, no API key needed
 // ─────────────────────────────────────────────────────────────────────────────
+
+export interface RiverGauge {
+  station: string;
+  river: string;
+  level: number;
+  dangerLevel: number;
+  trend: "rising" | "falling" | "steady";
+  lastUpdated: string;
+  status: "normal" | "warning" | "danger";
+}
 
 export async function GET() {
   try {
     // DHM Nepal flood forecast page
-    const res = await fetch("http://www.dhm.gov.np/floodforecast/", {
+    const res = await fetch("https://www.dhm.gov.np/floodforecast/", {
       signal: AbortSignal.timeout(10000),
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; NepalFloodMap/1.0; +https://github.com/yrarjun59/nepal-flood-map)",
+      },
     });
+
     if (!res.ok) {
-      // Return mock data if DHM site is down
-      return Response.json({ gauges: getMockGauges(), source: "mock" });
+      return Response.json({
+        gauges: getMockGauges(),
+        source: "mock",
+        note: "DHM site unavailable — using mock data",
+      });
     }
 
     const html = await res.text();
-    // In production, parse the HTML table for gauge data
-    // For now, return structured mock data
-    return Response.json({ gauges: getMockGauges(), source: "dhm_nepal" });
-  } catch {
-    return Response.json({ gauges: getMockGauges(), source: "mock_fallback" });
+
+    // Try to parse gauge data from the HTML table
+    // DHM Nepal's flood forecast page typically has a table with station data
+    const gauges = parseDHMTable(html);
+    if (gauges.length > 0) {
+      return Response.json({ gauges, source: "dhm_nepal" });
+    }
+
+    // If parsing fails, fall back to mock
+    return Response.json({
+      gauges: getMockGauges(),
+      source: "dhm_nepal_fallback",
+      note: "DHM site parsed but no gauge data extracted — using mock data",
+    });
+  } catch (err) {
+    return Response.json({
+      gauges: getMockGauges(),
+      source: "mock_fallback",
+      error: String(err),
+    });
   }
 }
 
-function getMockGauges() {
+// Parse DHM Nepal's HTML table for gauge data
+// This is a best-effort parser — structure may change
+function parseDHMTable(html: string): RiverGauge[] {
+  const gauges: RiverGauge[] = [];
+
+  // Look for table rows with station data
+  // Common pattern: station name, river name, water level, danger level
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch;
+
+  while ((rowMatch = rowRegex.exec(html)) !== null) {
+    const row = rowMatch[1];
+
+    // Extract station name
+    const station = extractCellText(row, 0);
+    const river   = extractCellText(row, 1);
+    const levelStr = extractCellText(row, 2);
+    const dangerStr = extractCellText(row, 3);
+
+    if (station && levelStr) {
+      const level = parseLevel(levelStr);
+      const danger = parseLevel(dangerStr);
+
+      if (level !== null) {
+        gauges.push({
+          station: cleanText(station),
+          river: cleanText(river) || "Unknown",
+          level: level,
+          dangerLevel: danger ?? 5.0,
+          trend: "steady",
+          lastUpdated: new Date().toISOString(),
+          status: level >= (danger ?? 5.0) ? "danger" : level >= (danger ?? 5.0) * 0.8 ? "warning" : "normal",
+        });
+      }
+    }
+  }
+
+  return gauges;
+}
+
+function extractCellText(row: string, index: number): string {
+  // Try <td> or <th> cells
+  const cellRegex = /(?:<td[^>]*>|<th[^>]*>)([\s\S]*?)<\/(?:td|th)>/gi;
+  let match;
+  let count = 0;
+
+  while ((match = cellRegex.exec(row)) !== null) {
+    if (count === index) {
+      // Strip HTML tags from cell content
+      return match[1].replace(/<[^>]*>/g, "").trim();
+    }
+    count++;
+  }
+  return "";
+}
+
+function parseLevel(str: string): number | null {
+  // Extract numeric value from strings like "4.82 m", "4.82m", "4.82"
+  const match = str.match(/[\d.]+/);
+  if (match) {
+    const val = parseFloat(match[0]);
+    return isNaN(val) ? null : val;
+  }
+  return null;
+}
+
+function cleanText(str: string): string {
+  return str.replace(/\s+/g, " ").trim();
+}
+
+// ── Mock data (used when DHM site is unavailable) ─────────────────────────────
+function getMockGauges(): RiverGauge[] {
   return [
     {
       station: "Bahrabise",
@@ -36,6 +141,7 @@ function getMockGauges() {
       dangerLevel: 5.2,
       trend: "rising",
       lastUpdated: "2026-08-29T08:00:00Z",
+      status: "warning",
     },
     {
       station: "Benighat",
@@ -44,6 +150,7 @@ function getMockGauges() {
       dangerLevel: 6.0,
       trend: "rising",
       lastUpdated: "2026-08-29T08:00:00Z",
+      status: "danger",
     },
     {
       station: "Narayanghat",
@@ -52,6 +159,7 @@ function getMockGauges() {
       dangerLevel: 9.0,
       trend: "steady",
       lastUpdated: "2026-08-29T08:00:00Z",
+      status: "warning",
     },
     {
       station: "Cheughat",
@@ -60,6 +168,7 @@ function getMockGauges() {
       dangerLevel: 4.5,
       trend: "falling",
       lastUpdated: "2026-08-29T08:00:00Z",
+      status: "normal",
     },
   ];
 }
