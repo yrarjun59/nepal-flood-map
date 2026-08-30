@@ -5,13 +5,11 @@
 // POST /api/refresh
 // Tries data sources in priority order. Returns latest verified stats as JSON.
 // Falls back to static data on any failure — never returns 5xx.
+// Primary LLM: Google Gemini 1.5 Flash (7 keys, multi-key fallback).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import Anthropic from "@anthropic-ai/sdk";
 import { LIVE_STATS } from "@/data/floodData";
 import type { LiveStats } from "@/types/flood";
-
-const anthropicClient = new Anthropic();
 
 // ── OpenAI-compatible client for free LLM alternatives ────────────────────────
 function createOpenAIClient(baseURL: string, apiKey: string) {
@@ -319,44 +317,6 @@ async function fetchViaGemini(): Promise<Partial<LiveStats> | null> {
   return null;
 }
 
-// ── Source 5: Anthropic web_search (optional — only if API key set) ───────────
-async function fetchViaAnthropic(): Promise<Partial<LiveStats> | null> {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  try {
-    const tools: Anthropic.ToolUnion[] = [
-      { type: "web_search_20250305", name: "web_search" } as Anthropic.WebSearchTool20250305,
-    ];
-    const response = await anthropicClient.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      tools: tools,
-      system:
-        "You are a disaster data analyst monitoring the August 26 2026 Nepal glacial flood " +
-        "(Bhote Koshi / Lhende Khola). Search for the LATEST confirmed official figures from " +
-        "Nepal Police, Nepal Army, NDRRMA, or major wire services (AP, Reuters, ABC News, NBC News). " +
-        "Ignore early estimates — use only the most recent confirmed figures. " +
-        "Return ONLY valid JSON with these exact keys (all numbers must be numeric type): " +
-        '{"deaths_nepal":number,"deaths_tibet":number,"deaths_total":number,' +
-        '"missing_nepal":number,"missing_foreigners":number,"missing_americans":number,' +
-        '"rescued":number,"impacted_total":number,"powerloss_mw":number,' +
-        '"source":"URL","last_updated":"ISO8601"} ' +
-        "No markdown. No explanation. JSON only.",
-      messages: [{ role: "user", content: "Get latest Nepal 2026 flood figures now." }],
-    });
-
-    const text = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => (b as { type: "text"; text: string }).text)
-      .join("");
-    const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean) as Partial<LiveStats>;
-    if (typeof parsed.deaths_total !== "number") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
 // Remove null/undefined fields so they don't overwrite static fallback values
 function cleanPartial<T extends Partial<Record<string, unknown>>>(obj: T | null): Partial<T> {
   if (!obj) return {};
@@ -372,13 +332,12 @@ function cleanPartial<T extends Partial<Record<string, unknown>>>(obj: T | null)
 
 export async function POST() {
   // Run all sources concurrently with independent timeouts
-  const [bipad, reliefweb, rss, freeLLM, gemini, anthropic] = await Promise.allSettled([
+  const [bipad, reliefweb, rss, freeLLM, gemini] = await Promise.allSettled([
     fetchBIPAD(),
     fetchReliefWeb(),
     fetchViaRSS(),
     fetchViaFreeLLM(),
     fetchViaGemini(),
-    fetchViaAnthropic(),
   ]);
 
   const bipadData = bipad.status === "fulfilled" ? cleanPartial(bipad.value) : null;
@@ -386,14 +345,12 @@ export async function POST() {
   const rssData = rss.status === "fulfilled" ? cleanPartial(rss.value) : null;
   const freeLLMData = freeLLM.status === "fulfilled" ? cleanPartial(freeLLM.value) : null;
   const geminiData = gemini.status === "fulfilled" ? cleanPartial(gemini.value) : null;
-  const anthropicData = anthropic.status === "fulfilled" ? cleanPartial(anthropic.value) : null;
 
-  const anyLive = bipadData ?? freeLLMData ?? rssData ?? geminiData ?? anthropicData ?? reliefwebData;
+  const anyLive = bipadData ?? freeLLMData ?? rssData ?? geminiData ?? reliefwebData;
 
-  // Merge: static base → Anthropic → Gemini → Free LLM → RSS → ReliefWeb → BIPAD (override)
+  // Merge: static base → Gemini → Free LLM → RSS → ReliefWeb → BIPAD (override)
   const merged: LiveStats = {
     ...LIVE_STATS,
-    ...(anthropicData ?? {}),
     ...(geminiData ?? {}),
     ...(freeLLMData ?? {}),
     ...(rssData ?? {}),
